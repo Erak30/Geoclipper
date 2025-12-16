@@ -1,0 +1,106 @@
+#! /usr/bin/env python3
+import math
+from geometry_msgs.msg import PoseStamped, Pose
+from nav2_simple_commander.robot_navigator import BasicNavigator, RunningTask, TaskResult
+import rclpy
+from std_msgs.msg import Header
+
+def toPoseStamped(pt: Pose, header: Header) -> PoseStamped:
+    pose = PoseStamped()
+    pose.pose.position.x = pt.x
+    pose.pose.position.y = pt.y
+    pose.header = header
+    return pose
+
+def _quaternion_to_yaw(q) -> float:
+    """
+    Convert a quaternion (geometry_msgs/Quaternion-like) to yaw (radians).
+    Works with objects that have x,y,z,w attributes.
+    """
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    return math.atan2(siny_cosp, cosy_cosp)
+
+def navigate_to_pose(navigator: BasicNavigator, start_pose: PoseStamped, goal_pose: PoseStamped) -> None:
+    navigator.setInitialPose(start_pose)
+
+    navigator.waitUntilNav2Active()
+
+    route_tracking_task = navigator.getAndTrackRoute(start_pose, goal_pose)
+
+    task_canceled = False
+    last_feedback = None
+    follow_path_task = RunningTask.NONE
+
+    while not navigator.isTaskComplete(task=route_tracking_task):
+        feedback = navigator.getFeedback(task=route_tracking_task)
+        while feedback is not None:
+            if not last_feedback or \
+                (feedback.last_node_id != last_feedback.last_node_id or
+                 feedback.next_node_id != last_feedback.next_node_id):
+                print('Passed node ' + str(feedback.last_node_id) +
+                      ' to next node ' + str(feedback.next_node_id) +
+                      ' along edge ' + str(feedback.current_edge_id) + '.')
+
+            last_feedback = feedback
+
+            if feedback.rerouted:
+                print('Passing new route to controller!')
+                follow_path_task = navigator.followPath(feedback.path)
+
+            feedback = navigator.getFeedback(task=route_tracking_task)
+
+        if navigator.isTaskComplete(task=follow_path_task):
+            print('Controller or waypoint follower server completed its task!')
+            navigator.cancelTask()
+            task_canceled = True
+
+    while not navigator.isTaskComplete(task=follow_path_task) and not task_canceled:
+        pass
+
+    result = navigator.getResult()
+    if result == TaskResult.SUCCEEDED:
+        print('Goal succeeded!')
+
+        try:
+            yaw = _quaternion_to_yaw(goal_pose.pose.orientation)
+        except Exception:
+            yaw = 0.0
+
+        offset_dist = 0.01  # 2 cm forward
+        dx = math.cos(yaw) * offset_dist
+        dy = math.sin(yaw) * offset_dist
+
+        final_orient_goal = PoseStamped()
+        final_orient_goal.header.frame_id = 'map'
+        final_orient_goal.header.stamp = navigator.get_clock().now().to_msg()
+        final_orient_goal.pose.position.x = goal_pose.pose.position.x + dx
+        final_orient_goal.pose.position.y = goal_pose.pose.position.y + dy
+        final_orient_goal.pose.orientation = goal_pose.pose.orientation
+
+        print(f"Commanding final orientation step (offset {offset_dist} m along yaw {yaw:.3f} rad)...")
+        navigator.goToPose(final_orient_goal)
+
+        # Wait until orientation adjustment is complete
+        while not navigator.isTaskComplete():
+            pass
+
+        final_result = navigator.getResult()
+        if final_result == TaskResult.SUCCEEDED:
+            print("Final orientation matched")
+        else:
+            print("Final orientation adjustment failed or incomplete (result: {})".format(final_result))
+
+    elif result == TaskResult.CANCELED:
+        print('Goal was canceled!')
+    elif result == TaskResult.FAILED:
+        print('Goal failed!')
+    else:
+        print('Goal has an invalid return status!')
+
+def main():
+    rclpy.init()
+    navigator = BasicNavigator()
+
+    # List of (start_pose, goal_pose) tuples
+    pose_pairs = [
