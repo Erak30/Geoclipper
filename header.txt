@@ -22,81 +22,122 @@ def _quaternion_to_yaw(q) -> float:
     return math.atan2(siny_cosp, cosy_cosp)
 
 def navigate_to_pose(navigator: BasicNavigator, start_pose: PoseStamped, goal_pose: PoseStamped) -> None:
+    """
+    Navigate from start_pose to goal_pose.
+    Once at the goal, move forward along the original approach line, return, then adjust final orientation.
+    """
     navigator.setInitialPose(start_pose)
-
     navigator.waitUntilNav2Active()
 
-    route_tracking_task = navigator.getAndTrackRoute(start_pose, goal_pose)
+    # Start route tracking
+    route_task = navigator.getAndTrackRoute(start_pose, goal_pose)
 
-    task_canceled = False
     last_feedback = None
     follow_path_task = RunningTask.NONE
+    task_canceled = False
 
-    while not navigator.isTaskComplete(task=route_tracking_task):
-        feedback = navigator.getFeedback(task=route_tracking_task)
-        while feedback is not None:
-            if not last_feedback or \
-                (feedback.last_node_id != last_feedback.last_node_id or
-                 feedback.next_node_id != last_feedback.next_node_id):
-                print('Passed node ' + str(feedback.last_node_id) +
-                      ' to next node ' + str(feedback.next_node_id) +
-                      ' along edge ' + str(feedback.current_edge_id) + '.')
+    # Track route and handle rerouting
+    while not navigator.isTaskComplete(task=route_task):
+        feedback = navigator.getFeedback(task=route_task)
+        while feedback:
+            if not last_feedback or (feedback.last_node_id != last_feedback.last_node_id or
+                                     feedback.next_node_id != last_feedback.next_node_id):
+                print(f"Passed node {feedback.last_node_id} to next node {feedback.next_node_id} "
+                      f"along edge {feedback.current_edge_id}.")
 
             last_feedback = feedback
 
             if feedback.rerouted:
-                print('Passing new route to controller!')
+                print("Passing new route to controller!")
                 follow_path_task = navigator.followPath(feedback.path)
 
-            feedback = navigator.getFeedback(task=route_tracking_task)
+            feedback = navigator.getFeedback(task=route_task)
 
         if navigator.isTaskComplete(task=follow_path_task):
-            print('Controller or waypoint follower server completed its task!')
+            print("Controller or waypoint follower server completed its task!")
             navigator.cancelTask()
             task_canceled = True
 
+    # Ensure path following finishes
     while not navigator.isTaskComplete(task=follow_path_task) and not task_canceled:
         pass
 
+    # Get navigation result
     result = navigator.getResult()
-    if result == TaskResult.SUCCEEDED:
-        print('Goal succeeded!')
+    if result != TaskResult.SUCCEEDED:
+        status = {TaskResult.CANCELED: "canceled",
+                  TaskResult.FAILED: "failed"}.get(result, f"invalid ({result})")
+        print(f"Goal {status}!")
+        return
 
-        try:
-            yaw = _quaternion_to_yaw(goal_pose.pose.orientation)
-        except Exception:
-            yaw = 0.0
+    print("Goal reached successfully!")
 
-        offset_dist = 0.01  # 2 cm forward
-        dx = math.cos(yaw) * offset_dist
-        dy = math.sin(yaw) * offset_dist
-
-        final_orient_goal = PoseStamped()
-        final_orient_goal.header.frame_id = 'map'
-        final_orient_goal.header.stamp = navigator.get_clock().now().to_msg()
-        final_orient_goal.pose.position.x = goal_pose.pose.position.x + dx
-        final_orient_goal.pose.position.y = goal_pose.pose.position.y + dy
-        final_orient_goal.pose.orientation = goal_pose.pose.orientation
-
-        print(f"Commanding final orientation step (offset {offset_dist} m along yaw {yaw:.3f} rad)...")
-        navigator.goToPose(final_orient_goal)
-
-        # Wait until orientation adjustment is complete
-        while not navigator.isTaskComplete():
-            pass
-
-        final_result = navigator.getResult()
-        if final_result == TaskResult.SUCCEEDED:
-            print("Final orientation matched")
-        else:
-            print("Final orientation adjustment failed or incomplete (result: {})".format(final_result))
-
-    elif result == TaskResult.CANCELED:
-        print('Goal was canceled!')
-    elif result == TaskResult.FAILED:
-        print('Goal failed!')
+    # --- Compute approach direction from last segment of path ---
+    if last_feedback and last_feedback.path and len(last_feedback.path.poses) >= 2:
+        path_poses = last_feedback.path.poses
+        p1 = path_poses[-2].pose.position
+        p2 = path_poses[-1].pose.position
+        dx_line = p2.x - p1.x
+        dy_line = p2.y - p1.y
+        line_yaw = math.atan2(dy_line, dx_line)
     else:
-        print('Goal has an invalid return status!')
+        # fallback to goal orientation
+        line_yaw = _quaternion_to_yaw(goal_pose.pose.orientation)
+
+    # --- Forward-and-back maneuver along approach line ---
+    forward_dist = 0.5  # meters
+    dx = math.cos(line_yaw) * forward_dist
+    dy = math.sin(line_yaw) * forward_dist
+
+    # Forward step
+    forward_pose = PoseStamped()
+    forward_pose.header.frame_id = 'map'
+    forward_pose.header.stamp = navigator.get_clock().now().to_msg()
+    forward_pose.pose.position.x = goal_pose.pose.position.x + dx
+    forward_pose.pose.position.y = goal_pose.pose.position.y + dy
+    forward_pose.pose.orientation = goal_pose.pose.orientation
+
+    print(f"Moving forward {forward_dist} m along approach line (yaw {line_yaw:.3f} rad)...")
+    navigator.goToPose(forward_pose)
+    while not navigator.isTaskComplete():
+        pass
+
+    # Backward step (return to original goal)
+    backward_pose = PoseStamped()
+    backward_pose.header.frame_id = 'map'
+    backward_pose.header.stamp = navigator.get_clock().now().to_msg()
+    backward_pose.pose.position.x = goal_pose.pose.position.x
+    backward_pose.pose.position.y = goal_pose.pose.position.y
+    backward_pose.pose.orientation = goal_pose.pose.orientation
+
+    print("Returning to original goal position...")
+    navigator.goToPose(backward_pose)
+    while not navigator.isTaskComplete():
+        pass
+
+    # --- Final orientation adjustment ---
+    offset_dist = 0.01  # optional small forward offset
+    dx = math.cos(line_yaw) * offset_dist
+    dy = math.sin(line_yaw) * offset_dist
+
+    final_orient_goal = PoseStamped()
+    final_orient_goal.header.frame_id = 'map'
+    final_orient_goal.header.stamp = navigator.get_clock().now().to_msg()
+    final_orient_goal.pose.position.x = goal_pose.pose.position.x + dx
+    final_orient_goal.pose.position.y = goal_pose.pose.position.y + dy
+    final_orient_goal.pose.orientation = goal_pose.pose.orientation
+
+    print("Adjusting final orientation...")
+    navigator.goToPose(final_orient_goal)
+    while not navigator.isTaskComplete():
+        pass
+
+    final_result = navigator.getResult()
+    if final_result == TaskResult.SUCCEEDED:
+        print("Final orientation matched.")
+    else:
+        print(f"Final orientation adjustment failed or incomplete (result: {final_result})")
+
 
 def main():
     rclpy.init()
