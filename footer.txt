@@ -1,0 +1,25 @@
+    ]
+
+    for start, goal in pose_pairs:
+        start_pose = PoseStamped()
+        start_pose.header.frame_id = 'map'
+        start_pose.header.stamp = navigator.get_clock().now().to_msg()
+        start_pose.pose.position.x = start[0]
+        start_pose.pose.position.y = start[1]
+        start_pose.pose.orientation.w = 1.0
+
+        goal_pose = PoseStamped()
+        goal_pose.header.frame_id = 'map'
+        goal_pose.header.stamp = navigator.get_clock().now().to_msg()
+        goal_pose.pose.position.x = goal[0]
+        goal_pose.pose.position.y = goal[1]
+        goal_pose.pose.orientation.w = 1.0
+
+        print(f"Navigating from {start} to {goal}...")
+        navigate_to_pose(navigator, start_pose, goal_pose)
+
+    navigator.lifecycleShutdown()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
