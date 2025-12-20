@@ -21,7 +21,7 @@ def _quaternion_to_yaw(q) -> float:
     cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
     return math.atan2(siny_cosp, cosy_cosp)
 
-def navigate_to_pose(navigator: BasicNavigator, start_pose: PoseStamped, goal_pose: PoseStamped) -> None:
+def navigate_to_pose(navigator: BasicNavigator, start_pose: PoseStamped, goal_pose: PoseStamped) -> int:
     """
     Navigate from start_pose to goal_pose.
     Once at the goal, move forward along the original approach line, return, then adjust final orientation.
@@ -65,10 +65,10 @@ def navigate_to_pose(navigator: BasicNavigator, start_pose: PoseStamped, goal_po
     # Get navigation result
     result = navigator.getResult()
     if result != TaskResult.SUCCEEDED:
-        status = {TaskResult.CANCELED: "canceled",
-                  TaskResult.FAILED: "failed"}.get(result, f"invalid ({result})")
-        print(f"Goal {status}!")
-        return
+        print(f"[FAIL] Navigation failed with result: {result}")
+        navigator.cancelTask()   # <-- THIS STOPS THE ROBOT
+        return -1
+
 
     print("Goal reached successfully!")
 
@@ -137,7 +137,7 @@ def navigate_to_pose(navigator: BasicNavigator, start_pose: PoseStamped, goal_po
         print("Final orientation matched.")
     else:
         print(f"Final orientation adjustment failed or incomplete (result: {final_result})")
-
+    return 1
 
 def main():
     rclpy.init()
