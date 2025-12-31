@@ -114,6 +114,21 @@ colcon build --symlink-install
 ```
 ---
 
+## Phase 5: Set Up the correct controller
+
+The default controller the NAV2 simulation uses is the MPPI Controller which takes large turns between nodes. For the purposes of gas leak detection we need the robot to stay on the paths between nodes as much as possible and not diverge. This is why we need to change the controller to the DWB controller which does just that.
+
+1. **Go to correct folder**
+```
+cd nav2_ws/src/navigation2/nav2_bringup/params
+```
+
+2. **Replace existing params file with the one from our GitHub repo**
+```
+wget -O nav2_params.yaml https://raw.githubusercontent.com/Erak30/Geoclipper/main/nav2_params.yaml
+```
+---
+
 # Tool Usage
 
 ## Phase 1: Set up file paths in `main.js` (optional)
